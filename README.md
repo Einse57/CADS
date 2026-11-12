@@ -137,6 +137,25 @@ For large-scale processing of CT volumes (e.g., ~100–1000 scans or more), whic
     -out_seg "/path/to/seg_in_original_space" \  # Output segmentation masks in original image geometry
    ```
 
+## Device Selection
+All three inference scripts (`predict_images.py`, `run_02_inference.py`, `predict_slicer.py`) accept `-device`:
+
+- `auto` (default): CUDA if available, then Intel XPU, then CPU. If `CADS_DEVICE` is set (e.g. `CADS_DEVICE=xpu`), it is used instead.
+- `cuda`, `xpu` or `cpu`, optionally with an index (e.g. `cuda:1`). A device that is not available falls back to CPU.
+- `--cpu` still forces CPU.
+
+With `auto` mode, models are preloaded on the GPU only if the free device memory can be queried and is large enough; otherwise weights stay on CPU and are moved to the GPU per task.
+
+Intel XPU requires a PyTorch build with XPU support, e.g.:
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/xpu
+```
+
+To compare two segmentations of the same case and task (e.g. a CPU run and a GPU run) as Dice per structure:
+```bash
+python cads/scripts/compare_segs.py -a cpu/case/case_part_558.nii.gz -b xpu/case/case_part_558.nii.gz -task 558 -out dice_558.csv
+```
+
 ## Target Structures in Each Task
 Each task ID (model 551-559) represents a specific anatomical group. For detailed indexing please refer to [model labelmap](resources/info/labelmap.md).
 
@@ -172,6 +191,53 @@ Subcutaneous tissue, Muscle, Abdominopelvic cavity, Thoracic cavity, Bone struct
 Additional resources released with the CADS manuscript are available here:
 
 - **Expert Review and Corrected Label Subset on TotalSegmentator Data**: Radiologist review records for the 65 held-out TotalSegmentator test cases used in the CADS study, together with manually corrected labels used for the corrected mini-benchmark. [[Download]](https://drive.switch.ch/index.php/s/pc9mJaYLzoYSfwe)
+
+## Measurements (fill in on Intel box)
+
+Tested on: _to be filled in_
+
+Test CT: TCGA-THCA, patient TCGA-DE-A4MA, series "CT HeadNeck 3.0 B31s" (SeriesInstanceUID `1.3.6.1.4.1.14519.5.2.1.8421.4019.123670597687203511219463516732`), CC BY 3.0, from [TCIA](https://doi.org/10.7937/K9/TCIA.2016.9ZFRVF1B) via [IDC](https://portal.imaging.datacommons.cancer.gov/). Weights: `-license open` (CC BY-SA 4.0). Task 558 also runs tasks 552 and 553, which its post-processing uses.
+
+Setup (Windows, PowerShell, from the repository root):
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/xpu
+pip install -e . idc-index
+mkdir ct, logs -Force
+python -c "import torch; print(torch.__version__, torch.xpu.is_available(), torch.xpu.get_device_name(0) if torch.xpu.is_available() else '-')"
+idc download-from-selection --series-instance-uid 1.3.6.1.4.1.14519.5.2.1.8421.4019.123670597687203511219463516732 --download-dir ct_dicom --dir-template ""
+python -c "import SimpleITK as s, glob; r=s.ImageSeriesReader(); r.SetFileNames(r.GetGDCMSeriesFileNames('ct_dicom')); s.WriteImage(r.Execute(), 'ct/tcga_de_a4ma_0000.nii.gz')"
+```
+
+`measure.bat` (runs CPU and XPU for tasks 556 and 558, then the Dice comparison; the first XPU run includes one-time kernel compilation, so each XPU run is repeated):
+```bat
+cd /d %~dp0
+call .venv\Scripts\activate.bat
+set W=-in ct\tcga_de_a4ma_0000.nii.gz -license open
+for %%T in (556 558) do (
+  python cads\scripts\predict_images.py %W% -out out\cpu_%%T -task %%T -device cpu > logs\cpu_%%T.log 2>&1
+  python cads\scripts\predict_images.py %W% -out out\xpu_%%T_warm -task %%T -device xpu > logs\xpu_%%T_warm.log 2>&1
+  python cads\scripts\predict_images.py %W% -out out\xpu_%%T -task %%T -device xpu > logs\xpu_%%T.log 2>&1
+  python cads\scripts\compare_segs.py -a out\cpu_%%T\tcga_de_a4ma\tcga_de_a4ma_part_%%T.nii.gz -b out\xpu_%%T\tcga_de_a4ma\tcga_de_a4ma_part_%%T.nii.gz -task %%T -out logs\dice_%%T.csv > logs\dice_%%T.log 2>&1
+)
+```
+
+Run it once as a scheduled task in the desktop session, then read `Finished in` (per case) and `_nnUNetv2_predict took` (per model) from `logs\*.log`:
+```powershell
+schtasks /create /tn cads_measure /tr "$PWD\measure.bat" /sc once /st 23:59 /it /rl HIGHEST /f
+schtasks /run /tn cads_measure
+schtasks /delete /tn cads_measure /f   # after it has finished
+```
+
+| Task | Device | Wall time per case (s) | Model inference (s) | Dice CPU vs XPU (min / mean) |
+|---|---|---|---|---|
+| 556 | CPU | | | – |
+| 556 | XPU | | | |
+| 558 (+552, 553) | CPU | | | – |
+| 558 (+552, 553) | XPU | | | |
+
+Open weights on head-and-neck structures (Task 558): per the CADS supplementary source data (Supplementary Fig. 19), six targets are unsupported in `open` because their only ground truth comes from HaN-Seg (CC BY-NC-ND 4.0): optic nerve L, optic chiasm, anterior eyeball segment L, cochlea L, lacrimal gland L and R. Their label IDs remain in the Task 558 label map; on the test CT above, all six were empty with the `open` weights.
 
 ## License
 
