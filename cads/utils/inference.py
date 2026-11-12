@@ -138,25 +138,79 @@ def save_targets_to_nifti(save_separate_targets, output_targets_dir, affine, lab
         _ = p_map(partial(save_target_to_nifti, seg=seg, output_folder=output_targets_dir, labelmap_inv=labelmap_inv,
                   basename=patient_id, original_affine=affine), targets, num_cpus=nr_threads_saving)
 
-def setup_inference_devices(mode='auto', use_cpu=False, n_tasks=None):
+def _xpu_available():
+    return hasattr(torch, 'xpu') and torch.xpu.is_available()
+
+
+def get_device(device='auto', use_cpu=False):
+    """
+    Resolve the torch device used for inference.
+    device: 'auto', 'cuda', 'xpu' or 'cpu', optionally with an index (e.g. 'cuda:1', 'xpu:0').
+        If 'auto' (or None), the CADS_DEVICE environment variable is used when set.
+        'auto' picks CUDA if available, then Intel XPU, then CPU.
+        A requested device that is not available falls back to CPU.
+    """
+    if use_cpu:
+        return torch.device('cpu')
+    if device is None or device == 'auto':
+        device = os.environ.get('CADS_DEVICE', 'auto')
+    device = str(device).strip().lower()
+
+    if device == 'auto':
+        if torch.cuda.is_available():
+            return torch.device('cuda:0')
+        if _xpu_available():
+            return torch.device('xpu:0')
+        return torch.device('cpu')
+
+    dev = torch.device(device)
+    if (dev.type == 'cuda' and not torch.cuda.is_available()) or (dev.type == 'xpu' and not _xpu_available()):
+        print(f"[predict] Requested device '{device}' is not available, falling back to CPU")
+        return torch.device('cpu')
+    if dev.type in ('cuda', 'xpu') and dev.index is None:
+        dev = torch.device(dev.type, 0)
+    return dev
+
+
+def _device_mem_gb(device: torch.device):
+    """
+    Return (free, total) device memory in GB, or (None, None) if it cannot be queried.
+    """
+    try:
+        if device.type == 'cuda':
+            free_b, total_b = torch.cuda.mem_get_info(device)
+        elif device.type == 'xpu' and hasattr(torch.xpu, 'mem_get_info'):
+            free_b, total_b = torch.xpu.mem_get_info(device)
+        else:
+            return None, None
+    except Exception:
+        return None, None
+    return free_b / 1024**3, total_b / 1024**3
+
+
+def _empty_device_cache(device: torch.device):
+    if device.type == 'cuda' and torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    elif device.type == 'xpu' and _xpu_available():
+        torch.xpu.synchronize()
+        torch.xpu.empty_cache()
+
+
+def setup_inference_devices(mode='auto', use_cpu=False, n_tasks=None, device='auto'):
     """
     Set up devices for model initialization and inference based on available resources and mode.
     mode: Inference mode, one of ['auto', 'cpu-cache', 'preload-gpu'].
         'auto': Automatically choose mode based on available GPU memory and workload.
+            If free GPU memory cannot be queried, 'cpu-cache' is used.
         'cpu-cache': Load model weights on CPU, move to GPU for inference.
         'preload-gpu': Load model weights on GPU, perform inference on GPU.
+    device: 'auto', 'cuda', 'xpu' or 'cpu' (see get_device).
     """
-    def _vram_free_gb():
-        if not cuda_ok:
-            return 0.0, 0.0
-        free_b, total_b = torch.cuda.mem_get_info()
-        return free_b / 1024**3, total_b / 1024**3
-    
-    cuda_ok = (torch.cuda.is_available() and not use_cpu)
-    gpu = torch.device('cuda:0') if cuda_ok else torch.device('cpu')
+    gpu = get_device(device, use_cpu=use_cpu)
     cpu = torch.device('cpu')
 
-    if use_cpu or not cuda_ok:
+    if gpu.type == 'cpu':
         chosen_mode = 'cpu-only'
     else:
         if mode not in ('auto', 'cpu-cache', 'preload-gpu'):
@@ -165,9 +219,12 @@ def setup_inference_devices(mode='auto', use_cpu=False, n_tasks=None):
             high_vram_thresh_gb = 28.0  # I think a 28GB GPU should be safe for batch inference
             single_model_thresh_gb = 12.0  # also 12GB should be safe for a single task inference
 
-            free_gb, total_gb = _vram_free_gb() 
-            # VRAM is sufficient           
-            if free_gb >= high_vram_thresh_gb:
+            free_gb, total_gb = _device_mem_gb(gpu)
+            # free memory unknown
+            if free_gb is None:
+                chosen_mode = 'cpu-cache'
+            # VRAM is sufficient
+            elif free_gb >= high_vram_thresh_gb:
                 chosen_mode = 'preload-gpu'
             # intermediate VRAM（>=12GB) but single task, can still use preload-gpu
             elif n_tasks == 1 and free_gb >= single_model_thresh_gb:
@@ -192,8 +249,11 @@ def setup_inference_devices(mode='auto', use_cpu=False, n_tasks=None):
     if chosen_mode == 'cpu-only':
         print(f"[predict] CPU-only mode")
     else:
-        free_gb, total_gb = _vram_free_gb()
-        print(f"[predict] CUDA available. free={free_gb:.1f} GB / total={total_gb:.1f} GB | mode={chosen_mode}")
+        free_gb, total_gb = _device_mem_gb(gpu)
+        if free_gb is None:
+            print(f"[predict] {gpu} available. free memory unknown | mode={chosen_mode}")
+        else:
+            print(f"[predict] {gpu} available. free={free_gb:.1f} GB / total={total_gb:.1f} GB | mode={chosen_mode}")
 
     return chosen_mode, device_init, device_run
 
@@ -202,7 +262,7 @@ def use_device(pred, target_device: torch.device, restore_to: torch.device = Non
     """
     Temporarily switch the device of the predictor to the target_device, and restore it back to restore_to (default is to the original device) upon exit.
     - pred: a nnUNetPredictor
-    - clear_cuda_cache: if switching from CUDA to CPU, clear the CUDA cache to free up memory
+    - clear_cuda_cache: if switching from a GPU (CUDA or XPU) to CPU, clear the device cache to free up memory
     """
     old_device = getattr(pred, "device", torch.device("cpu"))
     try:
@@ -218,10 +278,9 @@ def use_device(pred, target_device: torch.device, restore_to: torch.device = Non
             pred.predictor.device = dst
             pred.device = dst
         # cpu-cache mode, low VRAM case
-        if clear_cuda_cache and target_device.type == "cuda" and dst.type == "cpu" and torch.cuda.is_available():
+        if clear_cuda_cache and target_device.type in ("cuda", "xpu") and dst.type == "cpu":
             try:
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
+                _empty_device_cache(target_device)
                 gc.collect()
             except Exception:
                 pass
@@ -230,7 +289,7 @@ def predict(files_in, folder_out, model_folder, task_ids,
             folds='all', use_cpu=False, preprocess_cads=True, postprocess_cads=True, 
             save_all_combined_seg=False, snapshot=False, save_separate_targets=False, 
             num_threads_preprocessing=4, nr_threads_saving=6, 
-            mode='auto', verbose=False):
+            mode='auto', verbose=False, device='auto'):
     """
     Loop images and use nnUNetv2 models to predict. 
     """
@@ -246,7 +305,7 @@ def predict(files_in, folder_out, model_folder, task_ids,
     task_ids.sort()
 
     # Setup device and inference mode
-    chosen_mode, device_init, device_run = setup_inference_devices(mode=mode, use_cpu=use_cpu, n_tasks=len(task_ids))
+    chosen_mode, device_init, device_run = setup_inference_devices(mode=mode, use_cpu=use_cpu, n_tasks=len(task_ids), device=device)
 
     # Init nnUNetv2 predictor
     models = {}
@@ -413,7 +472,7 @@ def predict(files_in, folder_out, model_folder, task_ids,
 def predict_preprocessed_images(files_in, folder_out, model_folder, task_ids, 
             folds='all', use_cpu=False, postprocess_cads=True, 
             num_threads_preprocessing=4, nr_threads_saving=6, 
-            mode='auto', verbose=False):
+            mode='auto', verbose=False, device='auto'):
     """
     Loop images and use nnUNetv2 models to predict. 
     """
@@ -427,7 +486,7 @@ def predict_preprocessed_images(files_in, folder_out, model_folder, task_ids,
     task_ids.sort()
 
     # Setup device and inference mode
-    chosen_mode, device_init, device_run = setup_inference_devices(mode=mode, use_cpu=use_cpu, n_tasks=len(task_ids))
+    chosen_mode, device_init, device_run = setup_inference_devices(mode=mode, use_cpu=use_cpu, n_tasks=len(task_ids), device=device)
 
     # Init nnUNetv2 predictor
     models = {}

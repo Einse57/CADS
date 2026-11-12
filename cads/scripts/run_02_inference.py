@@ -62,6 +62,16 @@ def main():
         default=False,
         help='Use CPU for processing (default: False, use GPU)'
     )
+
+    parser.add_argument(
+        "-device",
+        default="auto",
+        help=(
+            "Device for inference: 'auto' (Default; CUDA, then Intel XPU, then CPU), 'cuda', 'xpu' or 'cpu'. "
+            "An index can be given, e.g. 'cuda:1'. "
+            "If 'auto', the CADS_DEVICE environment variable is used when set. --cpu overrides this option."
+        ),
+    )
     
     parser.add_argument('--no-postprocessing', action='store_false',
                     dest='postprocessing',
@@ -109,7 +119,7 @@ def main():
 
     task_ids.sort()
     predict_preprocessed_images(input_images, output_seg_folder, model_folder, task_ids, folds=folds, use_cpu=args.cpu,
-        postprocess_cads=args.postprocessing, num_threads_preprocessing=args.nr_thr_preprocess, nr_threads_saving=args.nr_thr_saving, mode='auto', verbose=args.verbose)
+        postprocess_cads=args.postprocessing, num_threads_preprocessing=args.nr_thr_preprocess, nr_threads_saving=args.nr_thr_saving, mode='auto', verbose=args.verbose, device=args.device)
 
 
 if __name__ == "__main__":
