@@ -170,3 +170,7 @@ set_vars.sh
 models/
 cads/temp_results/
 cads/model_weights/
+# Converted model weights (OpenVINO IR / ONNX): export locally, never commit
+**/openvino/*.xml
+**/openvino/*.bin
+*.onnx

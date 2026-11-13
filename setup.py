@@ -30,6 +30,9 @@ setup(name='CADS',
             'acvl_utils==0.2;python_version=="3.9"',  # temporary workaround for nnUNetv2 issue
             'acvl_utils>=0.2,<0.3;python_version!="3.9"',  # For other Python versions: version range
         ],
+        extras_require={
+            'openvino': ['openvino>=2025.3'],  # optional OpenVINO backend (-device openvino)
+        },
         zip_safe=False,
         classifiers=[
             'Intended Audience :: Science/Research',

@@ -142,6 +142,7 @@ All three inference scripts (`predict_images.py`, `run_02_inference.py`, `predic
 
 - `auto` (default): CUDA if available, then Intel XPU, then CPU. If `CADS_DEVICE` is set (e.g. `CADS_DEVICE=xpu`), it is used instead.
 - `cuda`, `xpu` or `cpu`, optionally with an index (e.g. `cuda:1`). A device that is not available falls back to CPU.
+- `openvino` or `openvino:<OV device>`: OpenVINO backend, see below.
 - `--cpu` still forces CPU.
 
 With `auto` mode, models are preloaded on the GPU only if the free device memory can be queried and is large enough; otherwise weights stay on CPU and are moved to the GPU per task.
@@ -155,6 +156,22 @@ To compare two segmentations of the same case and task (e.g. a CPU run and a GPU
 ```bash
 python cads/scripts/compare_segs.py -a cpu/case/case_part_558.nii.gz -b xpu/case/case_part_558.nii.gz -task 558 -out dice_558.csv
 ```
+
+### OpenVINO backend (optional)
+`-device openvino` runs the network forward pass with the [OpenVINO](https://github.com/openvinotoolkit/openvino) CPU plugin; `-device openvino:<OV device>` (e.g. `openvino:GPU`) selects another OpenVINO device, and `CADS_DEVICE=openvino` works as well. Only the forward pass is swapped: nnU-Net 2.5.2 (unmodified) still does the preprocessing, sliding window, Gaussian weighting, mirroring (if enabled) and export, and CADS does its own pre- and post-processing.
+
+```bash
+pip install -e ".[openvino]"   # or: pip install "openvino>=2025.3"
+# optional: cache the IR locally (otherwise each run converts the network in memory at start-up)
+python cads/scripts/export_openvino.py -license open -task 552 553 556 558          # FP32 IR
+python cads/scripts/export_openvino.py -license open -task 552 553 556 558 -fp16    # FP16-compressed IR
+python cads/scripts/predict_images.py -in ct.nii.gz -out out -task 558 -license open -device openvino
+CADS_OV_IR=fp16 python cads/scripts/predict_images.py -in ct.nii.gz -out out_fp16 -task 558 -license open -device openvino
+```
+
+- The IR is written next to each checkpoint (`<weights>/<variant>/Dataset*/<trainer>/fold_all/openvino/checkpoint_final[_fp16].xml/.bin`), with a fixed input of one patch (`1 x C x patch size`), which is what the sliding window feeds. It is derived from the model weights and carries their licence: for `-license open` that is the CADS open weights (`cads-model-open_v1.0.0`, CC BY-SA 4.0, by the CADS authors). Export it locally from the downloaded weights; do not commit it to this repository.
+- On CPU the OpenVINO inference precision is pinned to FP32 (`CADS_OV_PRECISION_HINT=f32`), so CPUs with bf16 support do not switch precision on their own. `CADS_OV_PRECISION_HINT=default` keeps the plugin default. The FP16 IR only compresses the stored weights; on CPU they are still computed in FP32.
+- `CADS_LOG_FORWARD_TIME=1` prints the time spent in the network forward pass per model for the PyTorch devices; the OpenVINO backend always prints it.
 
 ## Target Structures in Each Task
 Each task ID (model 551-559) represents a specific anatomical group. For detailed indexing please refer to [model labelmap](resources/info/labelmap.md).
