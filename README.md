@@ -170,7 +170,8 @@ CADS_OV_IR=fp16 python cads/scripts/predict_images.py -in ct.nii.gz -out out_fp1
 ```
 
 - The IR is written next to each checkpoint (`<weights>/<variant>/Dataset*/<trainer>/fold_all/openvino/checkpoint_final[_fp16].xml/.bin`), with a fixed input of one patch (`1 x C x patch size`), which is what the sliding window feeds. It is derived from the model weights and carries their licence: for `-license open` that is the CADS open weights (`cads-model-open_v1.0.0`, CC BY-SA 4.0, by the CADS authors). Export it locally from the downloaded weights; do not commit it to this repository.
-- On CPU the OpenVINO inference precision is pinned to FP32 (`CADS_OV_PRECISION_HINT=f32`), so CPUs with bf16 support do not switch precision on their own. `CADS_OV_PRECISION_HINT=default` keeps the plugin default. The FP16 IR only compresses the stored weights; on CPU they are still computed in FP32.
+- Inference precision: on CPU it is pinned to FP32, so CPUs with bf16 support do not switch precision on their own. On GPU the OpenVINO default (FP16) is kept. `CADS_OV_PRECISION_HINT=default` keeps the plugin default on every device. The FP16 IR only compresses the stored weights; on CPU they are still computed in FP32.
+- When the output must match the CPU exactly, set `CADS_OV_PRECISION_HINT=f32`. In the measurements on the Arc 140T below, with the FP16 default every structure had a Dice of at least 0.99 against PyTorch CPU except OAR_Cochlea_R in 558 (0.973; 75 vs 71 voxels). With `f32` the label maps for 552, 553 and 558 were voxel-identical to CPU, with longer run times and more GPU memory (558: `Finished in` 115.5 s vs 70.2 s, peak GPU memory 6.2 GB vs 3.4 GB).
 - `CADS_LOG_FORWARD_TIME=1` prints the time spent in the network forward pass per model for the PyTorch devices; the OpenVINO backend always prints it.
 
 ## Target Structures in Each Task
@@ -301,7 +302,7 @@ The lowest values are on small or thin structures: left mammary gland in 556 (49
 
 ### OpenVINO backend on ARL (GPU and NPU)
 
-Tested on: ARL Core Ultra 9 285H / Arc 140T (GPU) / Intel AI Boost NPU, 64 GB RAM, Windows 11 (build 26200), Intel graphics driver 32.0.101.9033, NPU driver 32.0.100.5540, Python 3.11.18, torch 2.7.1+xpu, OpenVINO 2026.4.1. Same test CT and `-license open` weights as above, FP32 IR exported on the machine with `export_openvino.py`. Runs were done as a one-shot scheduled task in the desktop session, as above. GPU memory is the peak shared GPU memory of the process tree (Windows `GPU Process Memory` counters, sampled about every 2 s; the Arc 140T has no dedicated memory). Peak memory is the working set of the process tree.
+Tested on: ARL Core Ultra 9 285H / Arc 140T (GPU) / Intel AI Boost NPU, 64 GB RAM, Windows 11 (build 26200), Intel graphics driver 32.0.101.9033, NPU driver 32.0.100.5540, Python 3.11.18, torch 2.7.1+xpu, OpenVINO 2026.4.1. Same test CT and `-license open` weights as above, FP32 IR exported on the machine with `export_openvino.py`. GPU memory is the peak shared GPU memory of the process tree (Windows `GPU Process Memory` counters, sampled about every 2 s; the Arc 140T has no dedicated memory). Peak memory is the working set of the process tree.
 
 | Task | Device | Run | Wall time (s) | `Finished in` (s) | Model inference (s) | Network forward (s) | Peak memory (GB) | Peak GPU memory (GB) |
 |---|---|---|---|---|---|---|---|---|
@@ -325,7 +326,7 @@ Model inference and network forward are listed per model in the order 552 + 553 
 With f16, the only structure below 0.99 is OAR_Cochlea_R in 558 (75 vs 71 voxels, Dice 0.9726); the lowest in 556 is the left mammary gland (492 vs 499 voxels). With the f32 hint, the GPU label maps for 552, 553 and 558 were voxel-identical to the PyTorch CPU ones.
 
 `openvino:NPU` (Intel AI Boost), compile and one-patch check with `PERFORMANCE_HINT=LATENCY`, no other settings:
-- Task 556 IR (input 1 x 1 x 192 x 192 x 192): `compile_model` had not returned after 30 min (no error, peak memory 13.2 GB) and was stopped. The 552 and 553 IRs have the same input size and were not tried.
+- Task 556 IR (input 1 x 1 x 192 x 192 x 192): `compile_model` did not finish within 30 min (no error, peak memory 13.2 GB). The 552 and 553 IRs have the same input size.
 - Task 558 IR (input 1 x 1 x 256 x 160 x 160): compiled in 374 s (peak memory 4.6 GB); the first inference failed with `L0 zeFenceHostSynchronize result: ZE_RESULT_ERROR_DEVICE_LOST, code 0x70000001 - device hung, reset, was removed, or driver update occurred`. The NPU reported status OK afterwards.
 - No CADS run on the NPU was possible with these settings.
 
