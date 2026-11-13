@@ -299,6 +299,36 @@ PyTorch CPU vs OpenVINO CPU, Dice per structure present in either segmentation (
 
 The lowest values are on small or thin structures: left mammary gland in 556 (492 voxels; 497 with FP32 IR, 493 with FP16 IR) and face in 553 (2,616 voxels; 2,576 with FP32 IR, 2,570 with FP16 IR). Differing voxels are counted over the whole 512 x 512 x 148 label map.
 
+### OpenVINO backend on ARL (GPU and NPU)
+
+Tested on: ARL Core Ultra 9 285H / Arc 140T (GPU) / Intel AI Boost NPU, 64 GB RAM, Windows 11 (build 26200), Intel graphics driver 32.0.101.9033, NPU driver 32.0.100.5540, Python 3.11.18, torch 2.7.1+xpu, OpenVINO 2026.4.1. Same test CT and `-license open` weights as above, FP32 IR exported on the machine with `export_openvino.py`. Runs were done as a one-shot scheduled task in the desktop session, as above. GPU memory is the peak shared GPU memory of the process tree (Windows `GPU Process Memory` counters, sampled about every 2 s; the Arc 140T has no dedicated memory). Peak memory is the working set of the process tree.
+
+| Task | Device | Run | Wall time (s) | `Finished in` (s) | Model inference (s) | Network forward (s) | Peak memory (GB) | Peak GPU memory (GB) |
+|---|---|---|---|---|---|---|---|---|
+| 556 | `openvino:GPU` (f16, plugin default) | first | 58.8 | 25.7 | 13.6 | 9.1 | 7.9 | 2.8 |
+| 556 | `openvino:GPU` (f16, plugin default) | second | 53.7 | 25.7 | 13.8 | 9.1 | 7.5 | 2.8 |
+| 558 (+552, 553) | `openvino:GPU` (f16, plugin default) | first | 102.0 | 70.8 | 15.9 + 13.5 + 24.7 | 10.5 + 9.7 + 17.3 | 11.5 | 3.4 |
+| 558 (+552, 553) | `openvino:GPU` (f16, plugin default) | second | 102.9 | 70.2 | 15.8 + 13.6 + 24.7 | 10.4 + 9.6 + 17.3 | 10.1 | 3.4 |
+| 558 (+552, 553) | `openvino:GPU`, `CADS_OV_PRECISION_HINT=f32` | single | 139.0 | 115.5 | 28.2 + 25.9 + 46.3 | 23.0 + 22.2 + 39.1 | 14.0 | 6.2 |
+
+Model inference and network forward are listed per model in the order 552 + 553 + 558. The first and second GPU runs gave byte-identical label maps.
+
+`openvino:GPU` vs PyTorch CPU on the same machine (`-device cpu`, Measurements above), Dice per structure present in either segmentation:
+
+| Part | f16 (default): Dice min / mean (differing voxels) | f32 hint: Dice min / mean (differing voxels) |
+|---|---|---|
+| 556 | 0.9929 / 0.9976 (17) | not run |
+| 558 | 0.9726 / 0.9987 (47) | 1.0000 / 1.0000 (0) |
+| 552 | 0.9991 / 0.9998 (48) | 1.0000 / 1.0000 (0) |
+| 553 | 0.9994 / 0.9998 (84) | 1.0000 / 1.0000 (0) |
+
+With f16, the only structure below 0.99 is OAR_Cochlea_R in 558 (75 vs 71 voxels, Dice 0.9726); the lowest in 556 is the left mammary gland (492 vs 499 voxels). With the f32 hint, the GPU label maps for 552, 553 and 558 were voxel-identical to the PyTorch CPU ones.
+
+`openvino:NPU` (Intel AI Boost), compile and one-patch check with `PERFORMANCE_HINT=LATENCY`, no other settings:
+- Task 556 IR (input 1 x 1 x 192 x 192 x 192): `compile_model` had not returned after 30 min (no error, peak memory 13.2 GB) and was stopped. The 552 and 553 IRs have the same input size and were not tried.
+- Task 558 IR (input 1 x 1 x 256 x 160 x 160): compiled in 374 s (peak memory 4.6 GB); the first inference failed with `L0 zeFenceHostSynchronize result: ZE_RESULT_ERROR_DEVICE_LOST, code 0x70000001 - device hung, reset, was removed, or driver update occurred`. The NPU reported status OK afterwards.
+- No CADS run on the NPU was possible with these settings.
+
 Open weights on head-and-neck structures (Task 558): per the CADS supplementary source data (Supplementary Fig. 19), six targets are unsupported in `open` because their only ground truth comes from HaN-Seg (CC BY-NC-ND 4.0): optic nerve L, optic chiasm, anterior eyeball segment L, cochlea L, lacrimal gland L and R. Their label IDs remain in the Task 558 label map; on the test CT above, all six were empty with the `open` weights.
 
 ## License
