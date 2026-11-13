@@ -269,6 +269,36 @@ CPU vs XPU (second run), Dice per structure present in either segmentation:
 
 The 556 and 558 label maps from CPU and XPU are byte-identical.
 
+### OpenVINO backend on CPU
+
+Tested on: Intel Xeon (Linux VM, 8 vCPU, 16 GB RAM, AVX-512/AMX), Python 3.11.17, torch 2.5.1+cpu, OpenVINO 2026.4.1, CPU plugin with FP32 inference precision. Same test CT and `-license open` weights as above. The VM is shared, so the times varied noticeably between repeated runs; both runs are listed. "Network forward" is the time spent in the network forward pass (`CADS_LOG_FORWARD_TIME=1` for PyTorch, always printed for OpenVINO); peak memory is the RSS of the process tree, sampled every 0.5 s.
+
+| Task | Backend | Run | `Finished in` (s) | Model inference (s) | Network forward (s) | Peak memory (GB) |
+|---|---|---|---|---|---|---|
+| 556 | PyTorch CPU | 1 | 102.7 | 87.6 | 81.5 | 9.3 |
+| 556 | PyTorch CPU | 2 | 100.0 | 85.2 | 78.0 | 9.4 |
+| 556 | OpenVINO CPU, FP32 IR | 1 | 88.5 | 73.6 | 66.5 | 8.3 |
+| 556 | OpenVINO CPU, FP32 IR | 2 | 61.4 | 47.5 | 41.2 | 9.0 |
+| 556 | OpenVINO CPU, FP16 IR | 1 | 65.6 | 50.7 | 44.7 | 9.1 |
+| 558 (+552, 553) | PyTorch CPU | 1 | 438.1 | 159.4 + 75.7 + 183.0 | 152.4 + 70.8 + 134.4 | 11.6 |
+| 558 (+552, 553) | PyTorch CPU | 2 | 627.5 | 77.8 + 83.8 + 445.1 | 71.2 + 78.5 + 164.4 | 11.4 |
+| 558 (+552, 553) | OpenVINO CPU, FP32 IR | 1 | 408.3 | 58.8 + 199.0 + 127.3 | 51.9 + 193.7 + 89.2 | 12.2 |
+| 558 (+552, 553) | OpenVINO CPU, FP32 IR | 2 | 512.1 | 55.4 + 50.8 + 382.8 | 48.4 + 45.5 + 94.5 | 12.0 |
+| 558 (+552, 553) | OpenVINO CPU, FP16 IR | 1 | 210.9 | 51.8 + 41.5 + 97.5 | 45.4 + 36.5 + 86.5 | 12.3 |
+
+Model inference and network forward are listed per model in the order 552 + 553 + 558. Repeated runs of the same backend gave byte-identical label maps. The IR export (`export_openvino.py`, all four tasks) took 44 s (FP32) and 41 s (FP16) with a peak memory of 3.8 GB.
+
+PyTorch CPU vs OpenVINO CPU, Dice per structure present in either segmentation (no structure below 0.99):
+
+| Part | Structures present | FP32 IR: Dice min / mean (differing voxels) | FP16 IR: Dice min / mean (differing voxels) |
+|---|---|---|---|
+| 556 | 3 / 15 | 0.9949 / 0.9982 (16) | 0.9990 / 0.9996 (10) |
+| 558 | 23 / 29 | 0.9996 / 0.9999 (51) | 0.9984 / 0.9998 (63) |
+| 552 | 12 / 24 | 0.9993 / 0.9998 (42) | 0.9993 / 0.9998 (42) |
+| 553 | 4 / 18 | 0.9923 / 0.9980 (139) | 0.9911 / 0.9977 (151) |
+
+The lowest values are on small or thin structures: left mammary gland in 556 (492 voxels; 497 with FP32 IR, 493 with FP16 IR) and face in 553 (2,616 voxels; 2,576 with FP32 IR, 2,570 with FP16 IR). Differing voxels are counted over the whole 512 x 512 x 148 label map.
+
 Open weights on head-and-neck structures (Task 558): per the CADS supplementary source data (Supplementary Fig. 19), six targets are unsupported in `open` because their only ground truth comes from HaN-Seg (CC BY-NC-ND 4.0): optic nerve L, optic chiasm, anterior eyeball segment L, cochlea L, lacrimal gland L and R. Their label IDs remain in the Task 558 label map; on the test CT above, all six were empty with the `open` weights.
 
 ## License
